@@ -1,11 +1,11 @@
-const MODES = ['paint', 'run', 'sweep', 'rewind', 'evolve', 'scope'];
+const MODES = ['paint', 'run', 'sweep', 'rewind', 'scope', 'orbit', 'airfoil'];
 export class Toolbar {
   constructor(el, bus) {
     this.el = el; this.bus = bus;
     el.innerHTML = `<div class="modes">${MODES.map((m, i) => `<button data-mode="${m}" title="${i + 1}">${m[0].toUpperCase() + m.slice(1)}</button>`).join('')}</div>
       <div class="transport"><button data-act="toggle" title="Space">▶</button><button data-act="step" title=". single step">⏭</button><button data-act="reset" title="R reset flow">↺</button></div>
       <div class="spacer"></div>
-      <div class="actions"><button data-act="share" title="Copy shareable URL">Share</button><button data-act="save" title="Save to a local slot">Save</button><button data-act="load" title="Load a local slot">Load</button><button data-act="export" title="Download design as JSON">Export</button><button data-act="import" title="Import a design JSON">Import</button><button data-act="csv" title="Download metric time series">CSV</button><button data-act="about" title="?">?</button></div>
+        <div class="actions"><button data-act="settings" title="Settings — depth, flow, viscosity, boundaries, tier: every parameter with a description (,)">⚙ Settings</button><button data-act="share" title="Copy shareable URL">Share</button><button data-act="save" title="Save design + rig to a local slot">Save</button><button data-act="load" title="Load a local slot">Load</button><button data-act="export" title="Download design + rig as JSON">Export</button><button data-act="import" title="Import a design JSON">Import</button><button data-act="csv" title="Download metric time series">CSV</button><button data-act="about" title="About / methodology (?) — press again to close">?</button></div>
       <div class="score" id="scoreBadge" title="composite score">—</div>`;
     el.addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;

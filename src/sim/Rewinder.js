@@ -21,6 +21,6 @@ export function* rewindProbe(solver, N = 200) {
   negate(solver); solver.reverse = false; solver.viscous = visc;
   const D_rev = relDiff(solver, snap);
   solver.restore(snap);
-  return { D_rev, N, horizonTime: N * solver.dt, flowThroughs: N * solver.dt / (solver.grid.Lx / solver.U0) };
+   return { D_rev, N, horizonTime: N * solver.dt, flowThroughs: N * solver.dt / (solver.grid.Lx / solver.Uref) };
 }
 export function runRewind(solver, N) { const g = rewindProbe(solver, N); let r; do r = g.next(); while (!r.done); return r.value; }

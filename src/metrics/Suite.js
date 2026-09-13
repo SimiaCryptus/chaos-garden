@@ -10,7 +10,7 @@ import { composite, breadthFromFlux } from './Score.js';
 export class MetricsSuite {
   constructor(solver, twin = null, opts = {}) {
     this.solver = solver; this.twin = twin;
-    this.settleTime = opts.settleTime ?? 4 * solver.grid.Lx / solver.U0;
+     this.settleTime = opts.settleTime ?? 4 * solver.grid.Lx / (solver.Uref ?? Math.abs(solver.U0)); // flow-throughs, independent of the flow direction
     this.win = solver.grid.analysisWindow();
     this.mi = new MutualInfo(solver.K);
     this.lyap = twin ? new Lyapunov(opts.lyap) : null;

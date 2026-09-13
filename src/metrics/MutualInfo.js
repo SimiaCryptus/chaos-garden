@@ -5,12 +5,13 @@ export class MutualInfo {
    /** `steps` > 1 folds a batch of identical-state ticks into one update (asynchronous backends). */
    accumulate(solver, steps = 1) {
     const K = this.K; if (!K) return;
-    const g = solver.grid, Nx = g.Nx, Ny = g.Ny, i = Nx - 2, sy = Nx, sz = Nx * Ny, J = this.joint;
+     // The outlet plane follows the sign of the flow rate: column Nx−2 for U₀ ≥ 0, column 1 otherwise; flux is counted positive in the flow direction.
+     const g = solver.grid, Nx = g.Nx, Ny = g.Ny, i = solver.outCol ?? Nx - 2, sgn = solver.fwd === false ? -1 : 1, sy = Nx, sz = Nx * Ny, J = this.joint;
      const f = steps === 1 ? this.forget : Math.pow(this.forget, steps);
      for (let n = 0; n < J.length; n++) J[n] *= f;
     for (let k = 0; k < g.Nz; k++) for (let j = 0; j < Ny; j++) {
       const idx = i + j * sy + k * sz; if (solver.solid[idx]) continue;
-       const flux = solver.u[idx] * steps; if (flux <= 0) continue;
+        const flux = solver.u[idx] * sgn * steps; if (flux <= 0) continue;
       const o = Math.floor(j * K / Ny);
       for (let c = 0; c < K; c++) J[c * K + o] += solver.tracers[c][idx] * flux;
     }

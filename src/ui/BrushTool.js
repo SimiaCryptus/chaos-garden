@@ -22,7 +22,7 @@ export class BrushTool {
       <h3>Layer</h3>
       <label>Field <select data-k="layer"><option value="vorticity">ω_z (depth-avg)</option><option value="dye">dye (16 inlet bands)</option><option value="speed">|u|</option></select></label>
       <label><input type="checkbox" data-k="lock"> lock color range</label>
-      <div class="hint">Inlet is on the left, outlet on the right; the dimmed strips are protected. Keyboard painting: focus the canvas, arrows move the caret, Enter stamps, Backspace erases.</div>`;
+        <div class="hint">Water enters on the left and leaves on the right (reversed for a negative flow rate; in a torus it wraps around); the dimmed strips are protected. Depth and every other parameter live in ⚙ Settings (,). Keyboard painting: focus the canvas, arrows move the caret, Enter stamps, Backspace erases. Switch to Airfoil (7) to let the painted shapes move with the water.</div>`;
     this.panel.addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;
       if (b.dataset.tool) this.setTool(b.dataset.tool);

@@ -1,4 +1,4 @@
-import { lut } from './Palette.js';
+import { lut, bandColors } from './Palette.js';
 import { bandpass2d } from '../metrics/Spectra.js';
 /** Plan-view compositing: field layer, barrier mask, paint preview, analysis-window overlay. */
 export class TopDownView {
@@ -6,9 +6,10 @@ export class TopDownView {
     this.barrier = barrier; this.layer = 'vorticity'; this.lockRange = false; this.showOverlay = true;
     this.range = { vorticity: 1, speed: 1, scope: 1 }; this.preview = null; this.caret = null;
     this.scopeBand = [0.15, 0.5]; this.lastScope = null; this.setGrid(grid);
+     this.rigOverlay = null; // (d, Nx, Ny) => void, installed by the airfoil RigTool to draw anchors and springs
   }
   setGrid(grid) { this.grid = grid; const n = grid.Nx * grid.Ny; this.field = new Float32Array(n); this.data = new Uint8ClampedArray(n * 4); this.dye = new Float32Array(n * 3); }
-  _bandColors(K) { if (this._bc?.length === K) return this._bc; this._bc = []; for (let c = 0; c < K; c++) { const h = c / K; this._bc.push(hsl(h, 0.75, 0.55)); } return this._bc; }
+   _bandColors(K) { if (this._bc?.length !== K) this._bc = bandColors(K); return this._bc; }
   compose(solver) {
     const g = this.grid, Nx = g.Nx, Ny = g.Ny, Nz = g.Nz, n2 = Nx * Ny, f = this.field, d = this.data, mask = this.barrier.mask;
     const layer = this.layer;
@@ -42,6 +43,7 @@ export class TopDownView {
       for (let j = j0; j < j0 + ny; j += 2) { mark(i0, j); mark(i0 + nx - 1, j); }
       const pc = this.barrier.protectedCols; for (let j = 0; j < Ny; j++) { for (let i = 0; i < pc; i++) { const o = (i + j * Nx) * 4; d[o] *= 0.6; d[o + 1] *= 0.6; d[o + 2] *= 0.6; } for (let i = Nx - pc; i < Nx; i++) { const o = (i + j * Nx) * 4; d[o] *= 0.6; d[o + 1] *= 0.6; d[o + 2] *= 0.6; } }
     }
+     if (this.rigOverlay) this.rigOverlay(d, Nx, Ny);
     return d;
   }
   _scope(g) {
@@ -53,4 +55,3 @@ export class TopDownView {
     this.lastScope = { k1, k2 };
   }
 }
-function hsl(h, s, l) { const f = (n) => { const k = (n + h * 12) % 12, a = s * Math.min(l, 1 - l); return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); }; return [f(0), f(8), f(4)]; }

@@ -1,4 +1,4 @@
-/** Module worker: evaluates one design at one depth (used by Sweep and Evolve). Protocol matches core/JobRunner.js. */
+/** Module worker: evaluates one design at one depth (used by Sweep). Protocol matches core/JobRunner.js. */
 import { evaluateDesign } from '../src/sim/Evaluate.js';
 
 self.onmessage = (e) => {

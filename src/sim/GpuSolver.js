@@ -9,6 +9,8 @@ const WG = 64;
  * (u,v,w,p,ω,∇·u, tracer outlet plane — or all tracers when `wantTracers`) reflect every submitted step.
  * Differences from the CPU: the pressure solve runs exactly `pIters` SOR sweeps (no residual early exit,
  * which would need a mid-step readback); the last sweep's max correction is reported as `report.residual`.
+  * The torus mean-flow drive is computed from the CPU mirror (one readback stale), and moving-solid
+  * velocities live in a `bodyv` buffer the advection kernels write into solid cells.
  */
 export class GpuSolver extends CpuSolver {
   constructor(grid, params, opts = {}) {
@@ -20,6 +22,7 @@ export class GpuSolver extends CpuSolver {
     if (!ctx) throw new Error('WebGPU device unavailable');
     this.ctx = ctx; this.device = ctx.device;
     this.wantTracers = false; this._dirty = false; this._inflight = null; this._epoch = 0; this._dead = false;
+     this._tracersFresh = true; // false once a readback skipped the tracer bodies (only the outlet plane is mirrored then)
     const cx = 1 / (grid.hx * grid.hx), cy = 1 / (grid.hy * grid.hy), cz = 1 / (grid.hz * grid.hz);
     this._diag = 2 * (cx + cy + cz); this._explicit = this.dt * this.nu * this._diag < 0.25;
     this.report.diffusion = this._explicit ? 'explicit' : 'jacobi'; this.report.residual = 0;
@@ -41,15 +44,16 @@ export class GpuSolver extends CpuSolver {
     const un = (size) => mk(size, U.UNIFORM | U.COPY_DST);
     this._geomShared = !!shared;
     const b = this.b = {
-      sim: un(96), passFwd: un(16), passBwd: un(16), passC0: un(16), passC1: un(16), passScale: un(16),
+      sim: un(128), passFwd: un(16), passBwd: un(16), passC0: un(16), passC1: un(16), passScale: un(16),
       vel: st(16 * N), velA: st(16 * N), velB: st(16 * N), mn: st(16 * N), mx: st(16 * N), vort: st(16 * N),
       p: st(4 * (N + 1)), div: st(4 * N), tr: st(4 * K * N), trOut: st(4 * K * N), outlet: st(4 * K * M), noise: st(4 * M), atom: st(8),
       solid: shared ? shared.b.solid : st(4 * N), pNb: shared ? shared.b.pNb : st(24 * N), pInv: shared ? shared.b.pInv : st(4 * N),
+      bodyv: shared ? shared.b.bodyv : st(16 * N), // velocity of solid cells (moving bodies); the twin shares the main solver's copy
       stage: mk(40 * N + 4 * K * N + 8, U.MAP_READ | U.COPY_DST),
     };
-    this._own = Object.entries(b).filter(([k]) => !(shared && (k === 'solid' || k === 'pNb' || k === 'pInv'))).map(([, v]) => v);
+    this._own = Object.entries(b).filter(([k]) => !(shared && (k === 'solid' || k === 'pNb' || k === 'pInv' || k === 'bodyv'))).map(([, v]) => v);
     this._writePass(b.passFwd, 1, 0, 1); this._writePass(b.passBwd, -1, 0, 0); this._writePass(b.passC0, 0, 0, 0); this._writePass(b.passC1, 0, 1, 0);
-    this._simBuf = new ArrayBuffer(96); this._simU = new Uint32Array(this._simBuf); this._simF = new Float32Array(this._simBuf);
+    this._simBuf = new ArrayBuffer(128); this._simU = new Uint32Array(this._simBuf); this._simF = new Float32Array(this._simBuf);
     this._pack4 = new Float32Array(4 * N); this._packT = K ? new Float32Array(K * N) : null;
   }
   _writePass(buf, dir, color = 0, mode = 0) {
@@ -63,7 +67,8 @@ export class GpuSolver extends CpuSolver {
     f[8] = this.U0; f[9] = this.perturb; f[10] = a; f[11] = this.sor;
     u[12] = this.periodicY ? 1 : 0; u[13] = this.params.inflow === 'parabolic' ? 1 : 0; u[14] = this.K; u[15] = this.reverse ? 1 : 0;
     f[16] = this.zsT; f[17] = 1 / this.dt; f[18] = this._diag; f[19] = 1 / (1 + a * this._diag);
-    f[20] = this.forcing?.amp || 0; f[21] = this.forcing?.k || 0; f[22] = 0; f[23] = 0;
+    f[20] = this.forcing?.amp || 0; f[21] = this.forcing?.k || 0; f[22] = this._driveF || 0; f[23] = 0;
+    u[24] = this.fwd ? 1 : 0; u[25] = this.torus ? 1 : 0; u[26] = this.outCol; u[27] = this.inCol;
     this.device.queue.writeBuffer(this.b.sim, 0, this._simBuf);
   }
   _bg(pipeline, map) {
@@ -77,9 +82,9 @@ export class GpuSolver extends CpuSolver {
     // Binding numbers follow the table in gpu/shaders.js. Auto layouts only accept the bindings each entry point actually uses.
     const spec = {
       boundaries: [P.boundaries, { 0: b.sim, 8: b.vel, 15: b.tr, 16: b.noise }],
-      advectFwd: [P.advect, { 0: b.sim, 1: b.passFwd, 2: b.vel, 3: b.vel, 4: b.velA, 5: b.mn, 6: b.mx, 7: b.solid }],
-      advectBwd: [P.advect, { 0: b.sim, 1: b.passBwd, 2: b.vel, 3: b.velA, 4: b.velB, 5: b.mn, 6: b.mx, 7: b.solid }],
-      combine: [P.combine, { 0: b.sim, 2: b.vel, 3: b.velA, 4: b.velB, 5: b.mn, 6: b.mx, 7: b.solid }],
+      advectFwd: [P.advect, { 0: b.sim, 1: b.passFwd, 2: b.vel, 3: b.vel, 4: b.velA, 5: b.mn, 6: b.mx, 7: b.solid, 19: b.bodyv }],
+      advectBwd: [P.advect, { 0: b.sim, 1: b.passBwd, 2: b.vel, 3: b.velA, 4: b.velB, 5: b.mn, 6: b.mx, 7: b.solid, 19: b.bodyv }],
+      combine: [P.combine, { 0: b.sim, 2: b.vel, 3: b.velA, 4: b.velB, 5: b.mn, 6: b.mx, 7: b.solid, 19: b.bodyv }],
       advectTracers: [P.advectTracers, { 0: b.sim, 2: b.vel, 7: b.solid, 14: b.tr, 15: b.trOut }],
       diffuse: [P.diffuse, { 0: b.sim, 3: b.vel, 4: b.velA, 7: b.solid }],
       jacobi0: [P.jacobi, { 0: b.sim, 2: b.vel, 3: b.vel, 4: b.velA, 7: b.solid }],
@@ -92,7 +97,7 @@ export class GpuSolver extends CpuSolver {
       project: [P.project, { 0: b.sim, 7: b.solid, 8: b.vel, 9: b.p }],
       curl: [P.curl, { 0: b.sim, 2: b.vel, 7: b.solid, 17: b.vort }],
       gatherOutlet: [P.gatherOutlet, { 0: b.sim, 14: b.tr, 18: b.outlet }],
-      zeroSolid: [P.zeroSolid, { 0: b.sim, 7: b.solid, 8: b.vel, 9: b.p, 15: b.tr }],
+      zeroSolid: [P.zeroSolid, { 0: b.sim, 7: b.solid, 8: b.vel, 9: b.p, 15: b.tr, 19: b.bodyv }],
       addVel: [P.addVel, { 0: b.sim, 3: b.velA, 8: b.vel }],
       scaleVel: [P.scaleVel, { 0: b.sim, 1: b.passScale, 8: b.vel }],
     };
@@ -106,7 +111,7 @@ export class GpuSolver extends CpuSolver {
     const s32 = this._solid32 || (this._solid32 = new Uint32Array(this.grid.N)); s32.set(this.solid);
     q.writeBuffer(b.solid, 0, s32); q.writeBuffer(b.pNb, 0, this.pNb); q.writeBuffer(b.pInv, 0, this.pInv);
   }
-  _pack(a, b, c) { const o = this._pack4, N = this.grid.N; for (let n = 0, m = 0; n < N; n++, m += 4) { o[m] = a[n]; o[m + 1] = b[n]; o[m + 2] = c[n]; o[m + 3] = 0; } return o; }
+  _pack(a, b, c) { const o = this._pack4, N = this.grid.N; for (let n = 0, m = 0; n < N; n++, m += 4) { o[m] = a[n]; o[m + 1] = b[n]; o[m + 2] = c ? c[n] : 0; o[m + 3] = 0; } return o; }
   /** Run one kernel outside step() (geometry / twin / rewind helpers). */
   _kernel(key, wg, bg = this.bg[key]) {
     if (this._dead) return;
@@ -117,13 +122,13 @@ export class GpuSolver extends CpuSolver {
 
   /* ---------------- CPU ↔ GPU state ---------------- */
   /** Push the mirror arrays to the device (after reset / restore / geometry change). */
-  upload() {
+   upload({ tracers = true } = {}) {
     if (!this.b || this._dead) return;
     const q = this.device.queue, b = this.b, N = this.grid.N, K = this.K;
     q.writeBuffer(b.vel, 0, this._pack(this.u, this.v, this.w));
     q.writeBuffer(b.vort, 0, this._pack(this.wx, this.wy, this.wz));
     q.writeBuffer(b.p, 0, this.p);
-    if (K) { for (let c = 0; c < K; c++) this._packT.set(this.tracers[c], c * N); q.writeBuffer(b.tr, 0, this._packT); }
+     if (K && tracers) { for (let c = 0; c < K; c++) this._packT.set(this.tracers[c], c * N); q.writeBuffer(b.tr, 0, this._packT); this._tracersFresh = true; }
     q.writeBuffer(b.noise, 0, this.inletNoise);
     this._epoch++; this._dirty = false; // a readback issued before this upload must not overwrite the mirrors
   }
@@ -133,8 +138,17 @@ export class GpuSolver extends CpuSolver {
     this._uploadGeometry();
     this._kernel('zeroSolid', this._wgN); // zero solids on the device rather than pushing (possibly stale) mirrors
   }
+  /** Moving-body velocities: mirrors via the CPU path, device via the shared `bodyv` buffer (the twin reads the main solver's copy). */
+  setSolidVelocity(bu2, bv2) {
+    super.setSolidVelocity(bu2, bv2);
+    if (!this.b || this._dead || this._geomShared) return;
+    if (this.bodyU) this.device.queue.writeBuffer(this.b.bodyv, 0, this._pack(this.bodyU, this.bodyV, null));
+    else { this._pack4.fill(0); this.device.queue.writeBuffer(this.b.bodyv, 0, this._pack4); }
+  }
   reset(seed = this.params.seed) { super.reset(seed); if (this.b) this.upload(); }
-  restore(s) { super.restore(s); this.upload(); }
+   /** Tracer mirrors are complete only when the last readback carried them (`wantTracers`); the snapshot records that so restore() never pushes stale dye to the device. */
+   snapshot() { const s = super.snapshot(); s.tracersFresh = this._tracersFresh && !this._dirty; return s; }
+   restore(s) { super.restore(s); const fresh = s.tracersFresh !== false; this.upload({ tracers: fresh }); this._tracersFresh = fresh; }
   /** Device-side copy of another GpuSolver's state (twin initialisation). */
   copyStateFrom(m) {
     if (!(m instanceof GpuSolver) || this._dead) return;
@@ -164,6 +178,7 @@ export class GpuSolver extends CpuSolver {
   step() {
     if (this._dead) return this.report;
     const d = this.device, b = this.b, N = this.grid.N, K = this.K, wgN = this._wgN;
+    if (this.torus) this._driveF = this._driveForce(); // mean-flow relaxation from the (one readback stale) mirror
     this._writeSim();
     const enc = d.createCommandEncoder();
     let pass;
@@ -183,7 +198,7 @@ export class GpuSolver extends CpuSolver {
     }
     enc.clearBuffer(b.atom);
     pass = enc.beginComputePass();
-    if (this.forcing) run('forces');
+    if (this.forcing || this.torus) run('forces');
     run('divergence');
      const sweeps = Math.max(1, this.pIters | 0); // the final sweep below always runs, so never fewer than one
      for (let it = 0; it < sweeps - 1; it++) { run('sor0'); run('sor1'); }
@@ -228,11 +243,12 @@ export class GpuSolver extends CpuSolver {
     o = lay.p >> 2; this.p.set(f.subarray(o, o + N)); o = lay.div >> 2; this.div.set(f.subarray(o, o + N));
     if (want) { o = lay.tr >> 2; for (let c = 0; c < K; c++) this.tracers[c].set(f.subarray(o + c * N, o + (c + 1) * N)); }
     else if (K) { // only the outlet plane (what MutualInfo reads) — the rest of the tracer mirrors stay stale
-      o = lay.outlet >> 2; const M = Ny * Nz;
-      for (let c = 0; c < K; c++) { const T = this.tracers[c]; for (let k = 0; k < Nz; k++) for (let j = 0; j < Ny; j++) T[(Nx - 2) + j * Nx + k * Nx * Ny] = f[o + c * M + j + Ny * k]; }
+      o = lay.outlet >> 2; const M = Ny * Nz, oc = this.outCol;
+      for (let c = 0; c < K; c++) { const T = this.tracers[c]; for (let k = 0; k < Nz; k++) for (let j = 0; j < Ny; j++) T[oc + j * Nx + k * Nx * Ny] = f[o + c * M + j + Ny * k]; }
     }
+     this._tracersFresh = want || !K;
     const a = new Float32Array(ab, lay.atom, 2); // atomicMax on positive-float bit patterns ⇒ reinterpret as f32
-    const r = this.report; r.divMax = a[0]; r.divNorm = a[0] * g.hx / this.U0; r.residual = a[1];
+    const r = this.report; r.divMax = a[0]; r.divNorm = a[0] * g.hx / this.Uref; r.residual = a[1];
   }
   dispose() { this._dead = true; for (const buf of this._own) { try { buf.destroy(); } catch { /* ignore */ } } }
 }

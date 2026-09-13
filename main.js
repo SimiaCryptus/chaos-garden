@@ -19,7 +19,7 @@ async function boot() {
   const $ = (id) => document.getElementById(id);
   const app = new App({
     bus, params, tierInfo,
-    dom: { toolbar: $('toolbar'), tools: $('tools'), canvas: $('gl'), hud: $('hud'), side: $('side'), depth: $('depth'), notify: $('notify') },
+     dom: { app: $('app'), toolbar: $('toolbar'), tools: $('tools'), canvas: $('gl'), hud: $('hud'), side: $('side'), notify: $('notify') },
   });
   window.cg = app; // debugging handle; not used by any module
   await app.init();

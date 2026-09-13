@@ -1,6 +1,7 @@
 /**
  * WGSL kernels for GpuSolver — a stage-for-stage port of CpuSolver (§5). Velocity and vorticity are
- * vec4 buffers (xyz used), pressure has the same N+1 sentinel layout as the CPU, tracers are K×N floats.
+ * vec4 buffers (xyz used), pressure has the same N+1 sentinel layout as the CPU, tracers are K×N floats,
+ * `bodyv` is the velocity solid cells carry (moving rigid bodies; zero for walls at rest).
  * Every kernel is order-independent (red-black SOR, gather stencils, atomicMax on positive-float bits),
  * so a run is deterministic on a given device.
  */
@@ -11,7 +12,9 @@ struct Sim {
   U0: f32, amp: f32, aDiff: f32, om: f32,
   per: u32, parabolic: u32, K: u32, reverse: u32,
   zsT: f32, idt: f32, diag: f32, invJ: f32,
-  fAmp: f32, fK: f32, pad0: f32, pad1: f32,
+  fAmp: f32, fK: f32, fU: f32, pad0: f32,
+  fwd: u32, torus: u32, outCol: u32, inCol: u32,
+  pad1: u32, pad2: u32, pad3: u32, pad4: u32,
 };
 struct Pass { dir: f32, color: u32, mode: u32, pad: u32, };
 struct S3 { v: vec3f, lo: vec3f, hi: vec3f, };
@@ -34,6 +37,7 @@ struct S3 { v: vec3f, lo: vec3f, hi: vec3f, };
 @group(0) @binding(16) var<storage, read> noise: array<f32>;
 @group(0) @binding(17) var<storage, read_write> vort: array<vec4f>;
 @group(0) @binding(18) var<storage, read_write> outlet: array<f32>;
+@group(0) @binding(19) var<storage, read> bodyv: array<vec4f>;
 
 fn ijk(n: u32) -> vec3i {
   let Nx = sim.Nx; let Ny = sim.Ny;
@@ -78,21 +82,32 @@ fn ${name}(x: f32, y: f32, z: f32, zsv: vec3f, ysv: vec3f) -> S3 {
 }`;
 
 const KERNELS = `
-/* ---- inlet / outlet rows (one thread per (j,k) row), mirrors applyBoundaries ---- */
+/* ---- boundary columns (one thread per (j,k) row), mirrors applyBoundaries: inlet / one-way outlet on the faces chosen by sign(U₀), periodic ghosts in a torus ---- */
 @compute @workgroup_size(64) fn boundaries(@builtin(global_invocation_id) g: vec3u) {
   let t = g.x; let Ny = sim.Ny; let Nz = sim.Nz; if (t >= Ny * Nz) { return; }
   let j = t % Ny; let k = t / Ny; let Nx = sim.Nx; let N = sim.N;
   let i0 = j * Nx + k * Nx * Ny; let i1 = i0 + Nx - 1u;
+  let fwd = sim.fwd != 0u;
+  let inl = select(i1, i0, fwd); let out = select(i0, i1, fwd); let nb = select(i0 + 1u, i1 - 1u, fwd);
   let z = (f32(k) + 0.5) / f32(Nz);
   let pr = select(1.0, 6.0 * z * (1.0 - z), sim.parabolic != 0u);
-  let U = sim.U0; let dir = select(1.0, -1.0, sim.reverse != 0u); let c = sim.dt * U / sim.hx;
-  velrw[i0] = vec4f(dir * U * pr, sim.amp * U * pr * noise[j + Ny * k], 0.0, 0.0);
-  if (sim.reverse == 0u) { velrw[i1] = velrw[i1] - c * (velrw[i1] - velrw[i1 - 1u]); } else { velrw[i1] = vec4f(-U * pr, 0.0, 0.0, 0.0); }
+  let U = sim.U0; let c = sim.dt * abs(U) / sim.hx;
+  let nz = sim.amp * U * pr * noise[j + Ny * k];
+  if (sim.torus != 0u) {
+    velrw[i0] = velrw[i1 - 1u]; velrw[i1] = velrw[i0 + 1u]; // column 0 ≡ Nx−2, column Nx−1 ≡ 1
+  } else if (sim.reverse != 0u) {
+    velrw[inl] = vec4f(-U * pr, nz, 0.0, 0.0); velrw[out] = vec4f(-U * pr, 0.0, 0.0, 0.0);
+  } else {
+    velrw[inl] = vec4f(U * pr, nz, 0.0, 0.0);
+    var o = velrw[out] - c * (velrw[out] - velrw[nb]);
+    if (fwd) { o.x = max(o.x, 0.0); } else { o.x = min(o.x, 0.0); } // one-way outlet: no re-entry against the p = 0 reference
+    velrw[out] = o;
+  }
   let band = (j * sim.K) / Ny;
   for (var ch = 0u; ch < sim.K; ch++) {
     let o = ch * N;
-    trOut[o + i0] = select(0.0, 1.0, ch == band);
-    if (sim.reverse == 0u) { trOut[o + i1] = trOut[o + i1] - c * (trOut[o + i1] - trOut[o + i1 - 1u]); }
+    trOut[o + inl] = select(0.0, 1.0, ch == band);
+    if (sim.reverse == 0u) { trOut[o + out] = trOut[o + out] - c * (trOut[o + out] - trOut[o + nb]); }
   }
 }
 
@@ -101,16 +116,16 @@ const KERNELS = `
   let n = g.x; if (n >= sim.N) { return; }
   let c = ijk(n); let i = u32(c.x);
   if (i == 0u || i == sim.Nx - 1u) { outv[n] = src[n]; return; }
-   if (solid[n] != 0u) { outv[n] = vec4f(0.0); if (pp.mode != 0u) { mn[n] = vec4f(0.0); mx[n] = vec4f(0.0); } return; }
+  if (solid[n] != 0u) { outv[n] = bodyv[n]; if (pp.mode != 0u) { mn[n] = vec4f(0.0); mx[n] = vec4f(0.0); } return; }
   let zsv = vec3f(sim.zsT, sim.zsT, -1.0); let ysv = vec3f(1.0, -1.0, 1.0);
-   let a = sim.dt * pp.dir / vec3f(sim.hx, sim.hy, sim.hz);
+  let a = sim.dt * pp.dir / vec3f(sim.hx, sim.hy, sim.hz);
   let pos = vec3f(f32(c.x) + 0.5, f32(c.y) + 0.5, f32(c.z) + 0.5);
   let pm = pos - 0.5 * a * vel[n].xyz;
   let m = sampleVel(pm.x, pm.y, pm.z, zsv, ysv).v;
   let pb = pos - a * m;
   let s = sampleSrc(pb.x, pb.y, pb.z, zsv, ysv);
   outv[n] = vec4f(s.v, 0.0);
-   if (pp.mode != 0u) { mn[n] = vec4f(s.lo, 0.0); mx[n] = vec4f(s.hi, 0.0); }
+  if (pp.mode != 0u) { mn[n] = vec4f(s.lo, 0.0); mx[n] = vec4f(s.hi, 0.0); }
 }
 
 /* ---- clamped MacCormack: vel=u, src=ua (forward), outv=ub (backward, overwritten with the result) ---- */
@@ -118,7 +133,7 @@ const KERNELS = `
   let n = g.x; if (n >= sim.N) { return; }
   let i = n % sim.Nx;
   if (i == 0u || i == sim.Nx - 1u) { outv[n] = vel[n]; return; }
-  if (solid[n] != 0u) { outv[n] = vec4f(0.0); return; }
+  if (solid[n] != 0u) { outv[n] = bodyv[n]; return; }
   let c = src[n].xyz + 0.5 * (vel[n].xyz - outv[n].xyz);
   outv[n] = vec4f(clamp(c, mn[n].xyz, mx[n].xyz), 0.0);
 }
@@ -189,10 +204,11 @@ fn nbSum(n: i32, j: i32, k: i32) -> vec3f {
   outv[n] = vec4f((vel[n].xyz + sim.aDiff * nbSum(i32(n), c.y, c.z)) * sim.invJ, 0.0);
 }
 
+/* ---- body forces: torus mean-flow drive (fU, computed on the host from the mirror) + optional harmonic forcing ---- */
 @compute @workgroup_size(64) fn forces(@builtin(global_invocation_id) g: vec3u) {
   let n = g.x; if (n >= sim.N || solid[n] != 0u) { return; }
   let c = ijk(n); let TAU = 6.283185307179586;
-  velrw[n].x += sim.dt * sim.fAmp * sin(TAU * sim.fK * (f32(c.y) + 0.5) / f32(sim.Ny));
+  velrw[n].x += sim.dt * (sim.fU + sim.fAmp * sin(TAU * sim.fK * (f32(c.y) + 0.5) / f32(sim.Ny)));
   velrw[n].y += sim.dt * sim.fAmp * sin(TAU * sim.fK * (f32(c.x) + 0.5) / f32(sim.Nx) * 2.0);
 }
 
@@ -218,7 +234,7 @@ fn nbSum(n: i32, j: i32, k: i32) -> vec3f {
   let n = g.x; if (n >= sim.N) { return; }
   let Nx = sim.Nx; let Ny = sim.Ny;
   let i = n % Nx; let j = (n / Nx) % Ny; let k = n / (Nx * Ny);
-   if (i == 0u || i == Nx - 1u || ((i + j + k + pp.color) & 1u) != 0u) { return; }
+  if (i == 0u || i == Nx - 1u || ((i + j + k + pp.color) & 1u) != 0u) { return; }
   let id = pInv[n]; if (id == 0.0) { return; }
   let m = 6u * n;
   let cx = 1.0 / (sim.hx * sim.hx); let cy = 1.0 / (sim.hy * sim.hy); let cz = 1.0 / (sim.hz * sim.hz);
@@ -228,14 +244,18 @@ fn nbSum(n: i32, j: i32, k: i32) -> vec3f {
   atomicMax(&atom[1], bitcast<u32>(abs(d)));
 }
 
+/* ---- pressure gradient; x neighbours follow the gather-table rules (torus wrap, p = 0 on the outlet face, Neumann elsewhere) ---- */
 @compute @workgroup_size(64) fn project(@builtin(global_invocation_id) g: vec3u) {
   let n = g.x; if (n >= sim.N) { return; }
   let c = ijk(n); let i = c.x; let j = c.y; let k = c.z;
-  let Nx = i32(sim.Nx); let Ny = i32(sim.Ny); let Nz = i32(sim.Nz); let sy = Nx; let sz = Nx * Ny; let m = i32(n);
+  let Nx = i32(sim.Nx); let Ny = i32(sim.Ny); let Nz = i32(sim.Nz); let sy = Nx; let sz = Nx * Ny; let m = i32(n); let wrap = Nx - 3;
   if (i == 0 || i == Nx - 1 || solid[n] != 0u) { return; }
   let pc = p[n];
-  var pxm = pc; if (i > 1 && solid[m - 1] == 0u) { pxm = p[m - 1]; }
-  var pxp = 0.0; if (i != Nx - 2) { if (solid[m + 1] == 0u) { pxp = p[m + 1]; } else { pxp = pc; } }
+  var pxm = pc; var pxp = pc;
+  if (i == 1) { if (sim.torus != 0u) { if (solid[m + wrap] == 0u) { pxm = p[m + wrap]; } } else if (sim.fwd == 0u) { pxm = 0.0; } }
+  else if (solid[m - 1] == 0u) { pxm = p[m - 1]; }
+  if (i == Nx - 2) { if (sim.torus != 0u) { if (solid[m - wrap] == 0u) { pxp = p[m - wrap]; } } else if (sim.fwd != 0u) { pxp = 0.0; } }
+  else if (solid[m + 1] == 0u) { pxp = p[m + 1]; }
   var pym = pc; var pyp = pc;
   if (sim.per != 0u) {
     let jm = m + select(-sy, (Ny - 1) * sy, j == 0); let jp = m + select(sy, -(Ny - 1) * sy, j == Ny - 1);
@@ -282,11 +302,11 @@ fn nbSum(n: i32, j: i32, k: i32) -> vec3f {
 @compute @workgroup_size(64) fn gatherOutlet(@builtin(global_invocation_id) g: vec3u) {
   let t = g.x; let M = sim.Ny * sim.Nz; if (t >= sim.K * M) { return; }
   let c = t / M; let r = t % M; let j = r % sim.Ny; let k = r / sim.Ny;
-  outlet[t] = tr[c * sim.N + (sim.Nx - 2u) + j * sim.Nx + k * sim.Nx * sim.Ny];
+  outlet[t] = tr[c * sim.N + sim.outCol + j * sim.Nx + k * sim.Nx * sim.Ny];
 }
 @compute @workgroup_size(64) fn zeroSolid(@builtin(global_invocation_id) g: vec3u) {
   let n = g.x; if (n >= sim.N || solid[n] == 0u) { return; }
-  velrw[n] = vec4f(0.0); p[n] = 0.0;
+  velrw[n] = bodyv[n]; p[n] = 0.0;
   for (var ch = 0u; ch < sim.K; ch++) { trOut[ch * sim.N + n] = 0.0; }
 }
 @compute @workgroup_size(64) fn addVel(@builtin(global_invocation_id) g: vec3u) {
@@ -295,11 +315,11 @@ fn nbSum(n: i32, j: i32, k: i32) -> vec3f {
 }
 @compute @workgroup_size(64) fn blend(@builtin(global_invocation_id) g: vec3u) {
   let n = g.x; if (n >= sim.N) { return; }
-   velrw[n] = src[n] + pp.dir * (velrw[n] - src[n]);
+  velrw[n] = src[n] + pp.dir * (velrw[n] - src[n]);
 }
 @compute @workgroup_size(64) fn scaleVel(@builtin(global_invocation_id) g: vec3u) {
   let n = g.x; if (n >= sim.N) { return; }
-   velrw[n] *= pp.dir;
+  velrw[n] *= pp.dir;
 }
 `;
 

@@ -18,7 +18,7 @@ export function* evaluateDesign(job) {
   const solver = new CpuSolver(grid, params, { pIters: tierDef.pIters });
   solver.setBarriers(bf);
   const twin = params.twin && tierDef.twin ? new TwinSolver(solver) : null;
-  const Tft = grid.Lx / solver.U0;
+   const Tft = grid.Lx / solver.Uref; // |U₀| floored: a reversed or near-still flow must not yield a negative or infinite horizon
   const settle = (job.settleTime ?? 4) * Tft, measure = (job.measureTime ?? 2) * Tft;
   const metrics = new MetricsSuite(solver, twin, { settleTime: settle });
   const total = Math.ceil((settle + measure) / solver.dt);

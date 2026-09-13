@@ -19,13 +19,17 @@ export class DepthSlider {
         <label><input type="checkbox" data-k="twin"> twin</label>
         <label>tier <select data-k="tier">${opt('tier')}</select></label>
          <label>backend <select data-k="backend">${opt('backend')}</select></label>
+         <button data-act="settings" title="Every parameter — flow rate, viscosity, topology, boundaries — with a plain-language description (hotkey ,)">⚙ settings</button>
         <span class="readout" data-v="info"></span>
         <span class="badge settle" data-v="settle">settling</span>
       </div>`;
+     // Notation gets a tooltip: each control carries its schema description.
+     for (const k of ['H', 'Re', 'inflow', 'spanwise', 'walls', 'twin', 'tier', 'backend']) { const l = el.querySelector(`[data-k=${k}]`).closest('label, .H'); if (l) l.title = SCHEMA[k].desc; }
     this.range = el.querySelector('[data-k=H]'); this.out = el.querySelector('[data-v=H]'); this.cv = el.querySelector('canvas');
     this.range.addEventListener('input', () => { this.out.value = toH(+this.range.value).toFixed(3); this.drawMarkers(toH(+this.range.value)); });
     this.range.addEventListener('change', () => params.set('H', +toH(+this.range.value).toFixed(4)));
     el.addEventListener('change', (e) => { const k = e.target.dataset.k; if (!k || k === 'H') return; params.set(k, e.target.type === 'checkbox' ? e.target.checked : e.target.value); });
+     el.addEventListener('click', (e) => { if (e.target.closest('[data-act=settings]')) bus.emit('ui:action', 'settings'); });
     bus.on('params:change', () => this.sync()); bus.on('design:change', () => this.refreshScales());
     this.sync();
   }

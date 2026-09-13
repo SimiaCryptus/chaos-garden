@@ -1,6 +1,5 @@
 import { Clock } from './Clock.js';
 import { log } from './Log.js';
-import { Rng } from './Rng.js';
 import { TIERS } from './Tiers.js';
 import { applyPreset } from './Presets.js';
 import { encodeState, decodeState, encodeMask, decodeMask, runHash, fnv1a } from './HashCodec.js';
@@ -15,16 +14,20 @@ import { rewindProbe } from '../sim/Rewinder.js';
 import { MetricsSuite } from '../metrics/Suite.js';
 import { Recorder } from '../metrics/Recorder.js';
 import { scoreString, DEFINITIONS, NORMALIZERS, WEIGHTS_VERSION } from '../metrics/Score.js';
-import { Renderer } from '../render/Renderer.js';
+import { Renderer, VOLUME_DEPTH } from '../render/Renderer.js';
 import { TopDownView } from '../render/TopDownView.js';
+import { VolumeView } from '../render/VolumeView.js';
+import { RigidBodyRig } from '../sim/RigidBodies.js';
 import { Toolbar } from '../ui/Toolbar.js';
-import { BrushTool, forDisk } from '../ui/BrushTool.js';
-import { DepthSlider } from '../ui/DepthSlider.js';
+import { BrushTool } from '../ui/BrushTool.js';
+import { installGutters } from '../ui/Gutters.js';
 import { Notify } from '../ui/Notify.js';
 import { MetricsPanel } from '../ui/Panels/MetricsPanel.js';
+import { RigTool } from '../ui/RigTool.js';
+import { SettingsDialog } from '../ui/SettingsDialog.js';
 
-const MODES = ['paint', 'run', 'sweep', 'rewind', 'evolve', 'scope'];
-const SIM_KEYS = ['H', 'Re', 'inflow', 'spanwise', 'walls', 'seed', 'twin', 'perturb'];
+const MODES = ['paint', 'run', 'sweep', 'rewind', 'scope', 'orbit', 'airfoil'];
+const SIM_KEYS = ['H', 'Re', 'flow', 'topology', 'inflow', 'spanwise', 'walls', 'seed', 'twin', 'perturb'];
 const TIER_ORDER = ['G', 'A', 'B', 'C', 'D'];
 const logspace = (a, b, n) => Array.from({ length: n }, (_, i) => +Math.exp(Math.log(a) + (Math.log(b) - Math.log(a)) * i / (n - 1)).toPrecision(4));
 
@@ -35,7 +38,7 @@ export class App {
     this.mode = null; this.task = null; this._lastUi = 0; this._hashTimer = 0; this._prevLayer = 'vorticity';
     this._metricsDirtyAt = -1; // barrier edits re-solidify at once; the metric suite (twin re-perturb) re-arms after the stroke settles
     this._gpuBusy = false; // an asynchronous-backend batch is awaiting its readback
-    this._sweeping = false; this._evolving = false; this.sweepResults = null; this.lastScore = null; this.lastLabel = '';
+    this._sweeping = false; this.sweepResults = null; this.lastScore = null; this.lastLabel = '';
     this._frame = this._frame.bind(this);
   }
   /** WebGPU is used whenever a device exists and the `backend` param does not opt out. */
@@ -46,7 +49,7 @@ export class App {
     return t;
   }
   get tierOverride() { return this.params.get('tier') !== 'auto'; }
-  /** Batch evaluations (sweep / evolve) run on the CPU reference solver, one tier smaller than the live view, so they finish in seconds. */
+  /** Batch evaluations (sweep) run on the CPU reference solver, one tier smaller than the live view, so they finish in seconds. */
   get evalTier() { return TIER_ORDER[Math.max(TIER_ORDER.indexOf(this.tierName), TIER_ORDER.indexOf('C'))]; }
   /** Solver version string for run hashes; the GPU vendor/architecture is folded in (§5.6). */
   get solverVersion() { const s = this.solver; return s.backend === 'webgpu' ? `${s.version}@${GpuContext.current?.label || 'gpu'}` : s.version; }
@@ -64,12 +67,18 @@ export class App {
     this.toolbar = new Toolbar(dom.toolbar, bus);
     this.renderer = new Renderer(dom.canvas, Nx, Ny);
     this.view = new TopDownView(this.grid, this.barrier);
-    this.brush = new BrushTool({ canvas: dom.canvas, panel: dom.tools, barrier: this.barrier, params, bus, notify: this.notify, view: this.view });
-    this.depth = new DepthSlider(dom.depth, { params, bus, barrier: this.barrier });
+    this.volume = new VolumeView(this.grid);
+    // Paint tools and the airfoil rig share the left column; only the active mode's panel is shown.
+    const paintPanel = document.createElement('div'), rigPanel = document.createElement('div'); rigPanel.hidden = true; dom.tools.append(paintPanel, rigPanel); this.brushPanel = paintPanel;
+    this.brush = new BrushTool({ canvas: dom.canvas, panel: paintPanel, barrier: this.barrier, params, bus, notify: this.notify, view: this.view });
     this.panel = new MetricsPanel(dom.side, { notify: this.notify });
+    this.rig = new RigidBodyRig(this.barrier); this.rig.setGrid(this.grid); this.rig.onEvent = (msg) => this.notify.show(msg, { kind: 'warn' });
+    this.rigTool = new RigTool(rigPanel, { rig: this.rig, canvas: dom.canvas, view: this.view, notify: this.notify, bus, solver: () => this.solver, readout: () => this.panel.updateRig(this.rig, this.solver) });
+    this.settings = new SettingsDialog({ params, notify: this.notify, bus, barrier: this.barrier });
     this.recorder = new Recorder();
     this.clock = new Clock({ maxStepsPerFrame: 4 });
     this.jobs = new JobRunner(new URL('../../workers/evolve.worker.js', import.meta.url).href);
+    installGutters(dom.app, () => this.renderer.resize());
     this._buildHud();
     this._buildSim();
     this._wire();
@@ -89,8 +98,9 @@ export class App {
     this.metrics = new MetricsSuite(this.solver, this.twin);
     this.clock.setDt(this.solver.dt);
     this.view.setGrid(this.grid);
-    this.depth.setGrid(this.grid);
-    this.depth.setInfo({ grid: this.grid, solver: this.solver, tierName: this.tierName });
+    this.volume.setGrid(this.grid); this.renderer.setVolumeGrid(this.grid.Nx, this.grid.Ny, this.grid.Nz); // Nz follows H
+    this.rig?.setGrid(this.grid);
+    this.settings.setGrid(this.grid);
     this.recorder.reset();
     this.task = null;
     log.info('sim built', { grid: [this.grid.Nx, this.grid.Ny, this.grid.Nz], dt: this.solver.dt, twin: !!this.twin, tier: this.tierName, backend: this.solver.backend });
@@ -98,7 +108,7 @@ export class App {
 
   _buildHud() {
     this.hud = this.dom.hud;
-    this.hud.innerHTML = `<span data-v="t"></span><span data-v="div" title="‖∇·u‖∞·hx/U₀ after projection (solver trust)"></span><span data-v="task"></span>
+    this.hud.innerHTML = `<span data-v="t"></span><span data-v="div" title="‖∇·u‖∞·hx/U₀ after projection (solver trust)"></span><span class="badge settle" data-v="settle" title="Metrics are time-averaged only after the flow has settled (four flow-throughs since the last reset)">settling</span><span data-v="task"></span><span data-v="orbit"></span>
       <span class="lock" data-v="lock" title="color range locked" hidden>🔒</span>
       <span class="scope">band <input type="range" min="0" max="100" value="15" data-k="k1" aria-label="scope band low"><input type="range" min="0" max="100" value="50" data-k="k2" aria-label="scope band high"><span data-v="band"></span></span>`;
     this.hud.addEventListener('input', (e) => {
@@ -120,6 +130,7 @@ export class App {
     });
     bus.on('design:change', () => this._scheduleHash());
     window.addEventListener('resize', () => this.renderer.resize());
+    if (typeof ResizeObserver !== 'undefined') new ResizeObserver(() => this.renderer.resize()).observe(this.dom.canvas); // the gutters resize the stage without a window resize
     window.addEventListener('keydown', (e) => this._key(e));
   }
 
@@ -128,14 +139,18 @@ export class App {
     if (!MODES.includes(m) || m === this.mode) return;
     const prev = this.mode;
     if (prev === 'scope') { this.view.layer = this._prevLayer; this.hud.classList.remove('scope-on'); }
-    if (prev === 'sweep' || prev === 'evolve') this.jobs.cancelAll();
-    this.mode = m; this.toolbar.setMode(m); this.brush.setEnabled(m === 'paint'); this.panel.setMode(m);
+    if (prev === 'orbit') this.renderer.setView('plan');
+    if (prev === 'airfoil') this._leaveAirfoil();
+    if (prev === 'sweep') this.jobs.cancelAll();
+    this.mode = m; this.toolbar.setMode(m); this.brush.setEnabled(m === 'paint'); this.rigTool.setEnabled(m === 'airfoil'); this.brushPanel.hidden = m === 'airfoil'; this.panel.setMode(m);
+    this.dom.canvas.style.cursor = m === 'paint' ? 'crosshair' : m === 'airfoil' ? 'pointer' : m === 'orbit' ? 'grab' : 'default';
     switch (m) {
       case 'run': this.clock.play(); break;
       case 'sweep': this.clock.pause(); this.runSweep(); break;
       case 'rewind': this.clock.pause(); this.startRewind(); break;
-      case 'evolve': this.clock.pause(); this.runEvolve(); break;
       case 'scope': this._prevLayer = this.view.layer; this.view.layer = 'scope'; this.hud.classList.add('scope-on'); break;
+      case 'orbit': this.renderer.setView('orbit'); break; // clock state is left alone: orbit is a view, watch it run or paused
+      case 'airfoil': this._enterAirfoil(); break; // clock state is left alone as well: bodies only move while the water does
     }
     this.toolbar.setRunning(this.clock.running);
   }
@@ -151,11 +166,27 @@ export class App {
       case 'export': download(`chaos-garden-${this.designHash()}.json`, exportJSON(this.designState()), 'application/json'); break;
       case 'import': this.importFile(); break;
       case 'csv': download(`cg-run-${this.runHash()}.csv`, this.recorder.toCSV(), 'text/csv'); break;
+      case 'settings': this.settings.open(); break;
       case 'about': this.about(); break;
     }
   }
 
   resetFlow() { this.solver.reset(this.params.get('seed')); this.metrics.reset(); this.recorder.reset(); this.notify.show('Flow reset from seed (design kept)'); }
+  /* ---------------- airfoil mode: painted shapes become rigid bodies ---------------- */
+  /** Entering: the painted design is split into bodies (or the previous rig is kept if the design is unchanged). One undo entry covers the whole session. */
+  _enterAirfoil() {
+    this.brush.pushUndo();
+    this.rig.setGrid(this.grid);
+    const n = this.rig.enter(this.barrier.mask);
+    this.notify.show(n ? `Airfoil: ${n} ${n === 1 ? 'body' : 'bodies'} adopted from the design — anchor them, add springs, or generate a NACA section` : 'Airfoil: no bodies yet — generate a NACA section, or paint shapes in Paint mode and come back');
+  }
+  /** Leaving: bodies are frozen where they are and become the painted design; every solid returns to rest. */
+  _leaveAirfoil() {
+    this.rig.leave();
+    this.solver.setSolidVelocity(null);
+    if (this.twin) { this.twin.solver.bodyU = this.twin.solver.bodyV = null; }
+    this.brush.commit();
+  }
 
   /* ---------------- main loop ---------------- */
   _frame(now) {
@@ -166,8 +197,9 @@ export class App {
       this.solver.wantTracers = this.view.layer === 'dye'; // async backend reads all tracers back only when drawn (the outlet plane for Î is always read)
       if (this.task) this._pumpTask();
       else if (this.solver.isAsync) this._stepAsync(now);
-      else { const n = this.clock.tick(now); for (let s = 0; s < n; s++) this._step(); }
-      this.renderer.upload(this.view.compose(this.solver));
+      else { const n = this.clock.tick(now); if (n && this.mode === 'airfoil') this.rig.step(this.solver, this.twin, n * this.solver.dt); for (let s = 0; s < n; s++) this._step(); }
+      if (this.mode === 'orbit') this.renderer.uploadVolume(this.volume.compose(this.solver, this.view.layer));
+      else this.renderer.upload(this.view.compose(this.solver));
       this.renderer.render();
       if (now - this._lastUi > 250) { this._lastUi = now; this._updateUi(); }
     } catch (err) { this._onError(err); }
@@ -186,6 +218,7 @@ export class App {
   _stepAsync(now) {
     if (this._gpuBusy) return;
     const n = this.clock.tick(now); if (!n) return;
+    if (this.mode === 'airfoil') this.rig.step(this.solver, this.twin, n * this.solver.dt); // one rig update per submitted batch
     let r; for (let s = 0; s < n; s++) { r = this.solver.step(); this.twin?.step(); }
     const solver = this.solver; this._gpuBusy = true;
     Promise.all([solver.sync(), this.twin?.sync()])
@@ -216,20 +249,29 @@ export class App {
     if (r.done) { this.task = null; task.done(r.value); }
   }
 
+  /** One-line solver status shared by the Score section and the settings footer (formerly the bottom bar). */
+  _solverInfo() {
+    const g = this.grid, s = this.solver, r = s.report, Re = this.params.get('Re');
+    const res = r.residual != null ? ` · res ${r.residual.toExponential(1)}` : '';
+    return `${TIERS[this.tierName]?.label || this.tierName} · ${s.backend} · ${g.Nx}×${g.Ny}×${g.Nz}${g.quasi2D ? ' (quasi-2D floor)' : ''} · Re_h ${(Re * g.H).toFixed(0)} · k_h ${g.kh.toFixed(1)} · Δt ${s.dt.toExponential(2)} · ${r.diffusion} · p-iters ${r.pIters}/${s.pIters}${res}`;
+  }
   _updateUi() {
     const m = this.metrics, res = m.currentScore(), raw = m.raw(), s = this.solver, b = m.bulk;
     const label = scoreString(res, { solverVersion: s.version, tier: this.tierName, tierOverride: this.tierOverride, precision: s.precision });
     this.lastScore = res; this.lastLabel = label;
     this.toolbar.setScore(res, label);
-    this.depth.setSettled(m.settled, m.settleProgress);
-    this.depth.setInfo({ grid: this.grid, solver: s, tierName: this.tierName });
     const q = (k) => this.hud.querySelector(`[data-v=${k}]`);
     q('t').textContent = `t ${s.t.toFixed(2)} · step ${s.stepCount} · ${this.clock.running ? 'running' : 'paused'}${this.clock.slowdowns ? ` · slowed ×${this.clock.slowdowns}` : ''}`;
     const dv = q('div'); dv.textContent = `∇·u ${b ? b.divNorm.toExponential(1) : '—'}`; dv.classList.toggle('warn', !!b && b.divNorm > NORMALIZERS.epsDiv);
+    const sb = q('settle'); sb.textContent = m.settled ? 'measuring' : `settling ${(m.settleProgress * 100).toFixed(0)}%`; sb.classList.toggle('ok', m.settled);
     const t = this.task; q('task').textContent = t ? `${t.label} ${t.progress?.phase || ''} ${((t.progress?.progress || 0) * 100).toFixed(0)}%` : '';
     q('lock').hidden = !this.view.lockRange;
     const sc = this.view.lastScope; q('band').textContent = sc && this.mode === 'scope' ? `k ∈ [${sc.k1.toFixed(1)}, ${sc.k2.toFixed(1)}] · k_h ${this.grid.kh.toFixed(1)}` : '';
-    this.panel.update({ raw, res, spectra: m.spectra, kh: this.grid.kh, label, hash: this.runHash(), recorder: this.recorder });
+    q('orbit').textContent = this.mode === 'orbit' ? `orbit · ${this.view.layer} · ${this.grid.Nx}×${this.grid.Ny}×${this.grid.Nz} voxels · z ×${(VOLUME_DEPTH / this.grid.H).toFixed(1)} · drag rotate · wheel zoom · right-drag pan` : '';
+    const info = this._solverInfo();
+    this.panel.update({ raw, res, spectra: m.spectra, kh: this.grid.kh, label, hash: this.runHash(), recorder: this.recorder, info });
+    this.settings.setInfo(info);
+    if (this.mode === 'airfoil') this.panel.updateRig(this.rig, s);
   }
 
   /* ---------------- rewind (§6.6) ---------------- */
@@ -263,38 +305,24 @@ export class App {
     finally { this._sweeping = false; this.panel.setJobProgress(null); }
   }
 
-  /* ---------------- evolve: (1+λ) hill-climb over the mask ---------------- */
-  async runEvolve({ generations = 12, lambda = 2 } = {}) {
-    if (this._evolving) return; this._evolving = true;
-    const w = this.barrier.Nx, h = this.barrier.Ny, budget = this.brush.budgetCells, pc = this.barrier.protectedCols;
-    const rng = new Rng((this.params.get('seed') ^ 0x5eed5eed) >>> 0), base = this._jobBase(), lineage = [];
-    const evalMask = (mask, tag) => this.jobs.run({ ...base, mask }, (p) => this.panel.setJobProgress(`evolve ${tag}`, p));
-    this.notify.show(`Evolve: (1+${lambda}) search at tier ${base.tierName} (cpu), ${generations} generations, ${this.jobs.concurrency} worker(s)`);
-    try {
-      let parentMask = Uint8Array.from(this.barrier.mask), parent = await evalMask(parentMask, 'parent');
-      lineage.push({ gen: 0, score: parent.score, note: 'parent', flags: parent.flags }); this.panel.setEvolve(lineage);
-      for (let gen = 1; gen <= generations && this.mode === 'evolve'; gen++) {
-        // Draw all λ children first (sequential RNG ⇒ deterministic lineage), evaluate them concurrently, keep the best improver.
-        const children = Array.from({ length: lambda }, () => mutateMask(parentMask, w, h, budget, pc, rng));
-        const rs = await Promise.all(children.map((c, i) => evalMask(c, `g${gen}/${i + 1}`)));
-        let best = -1;
-        rs.forEach((r, i) => { if (r.valid && r.score > parent.score && (best < 0 || r.score > rs[best].score)) best = i; });
-        rs.forEach((r, i) => lineage.push({ gen, score: r.score, note: i === best ? 'accepted' : 'rejected', flags: r.flags }));
-        this.panel.setEvolve(lineage);
-        if (best >= 0) { parent = rs[best]; parentMask = children[best]; this.brush.pushUndo(); this.barrier.setMask(parentMask); this.brush.commit(); }
-      }
-      this.notify.show(`Evolve finished: best S=${parent.score.toFixed(1)} (tier ${base.tierName})`);
-    } catch (err) { if (err?.message !== 'cancelled') { log.error('evolve', String(err)); this.notify.show('Evolve failed: ' + err.message, { kind: 'bad' }); } }
-    finally { this._evolving = false; this.panel.setJobProgress(null); }
-  }
-
   /* ---------------- persistence (§9.4) ---------------- */
   designHash() { return fnv1a(encodeMask(this.barrier.mask, this.barrier.Nx, this.barrier.Ny)); }
   runHash() { return runHash({ design: encodeMask(this.barrier.mask, this.barrier.Nx, this.barrier.Ny), params: this.params.all, solverVersion: this.solverVersion }); }
-  designState() { return { params: this.params.all, w: this.barrier.Nx, h: this.barrier.Ny, design: encodeMask(this.barrier.mask, this.barrier.Nx, this.barrier.Ny), score: this.lastScore?.score ?? null, scoreString: this.lastLabel }; }
+  /** Saved / exported state: parameters, the painted mask, the airfoil rig (bodies, anchors, springs — null when empty) and the last score. */
+  designState() {
+    return { params: this.params.all, w: this.barrier.Nx, h: this.barrier.Ny, design: encodeMask(this.barrier.mask, this.barrier.Nx, this.barrier.Ny), rig: this.rig.serialize(), score: this.lastScore?.score ?? null, scoreString: this.lastLabel };
+  }
   applyDesignState(o) {
     if (o.design) { const d = decodeMask(o.design); this.brush.pushUndo(); this.barrier.resampleFrom(d.mask, d.w, d.h); this.brush.commit(); }
     if (o.params) { const { tier, backend, ...rest } = o.params; this.params.set(rest); } // tier/backend are machine choices, not design
+    // The rig travels with the design. In Airfoil mode it is re-rasterized at once; otherwise it waits for the
+    // next entry into the mode, which keeps it because the restored design is exactly its bake.
+    const nb = this.rig.deserialize(o.rig || null);
+    if (this.mode === 'airfoil') {
+      this.rig.enter(this.barrier.mask); this.solver.setSolidVelocity(this.rig.bu, this.rig.bv); this.solver.setBarriers(this.barrier);
+      this.rigTool.syncControls(); this.rigTool.update();
+    }
+    if (nb) this.notify.show(`Rig restored: ${nb} ${nb === 1 ? 'body' : 'bodies'}, ${this.rig.springs.length} spring(s)`);
   }
   _writeHash() { const h = '#' + encodeState({ params: this.params.all, mask: this.barrier.mask, w: this.barrier.Nx, h: this.barrier.Ny }); history.replaceState(null, '', h); return h; }
   _scheduleHash() { clearTimeout(this._hashTimer); this._hashTimer = setTimeout(() => this._writeHash(), 400); }
@@ -303,7 +331,7 @@ export class App {
     if (navigator.clipboard?.writeText) navigator.clipboard.writeText(url).then(() => this.notify.show('Shareable URL copied'), () => this.notify.popover('Shareable URL', url));
     else this.notify.popover('Shareable URL', url);
   }
-  save() { const name = prompt('Save slot name:', `design-${this.designHash()}`); if (!name) return; saveSlot(name, this.designState()); this.notify.show(`Saved "${name}"`); }
+  save() { const name = prompt('Save slot name:', `design-${this.designHash()}`); if (!name) return; saveSlot(name, this.designState()); this.notify.show(`Saved "${name}"${this.rig.bodies.length ? ' (with rig)' : ''}`); }
   load() {
     const slots = listSlots(); if (!slots.length) { this.notify.show('No saved slots', { kind: 'warn' }); return; }
     const name = prompt('Load slot:\n' + slots.map((s) => `${s.name}${s.score != null ? `  (S=${Number(s.score).toFixed(1)})` : ''}`).join('\n'), slots[0].name);
@@ -324,13 +352,15 @@ export class App {
     const s = this.solver;
     const lines = [
       `Chaos Garden — solver ${s.version} (${s.backend}, ${s.precision}), weights ${WEIGHTS_VERSION}, tier ${this.tierName}${this.tierOverride ? ' (override)' : ''}`,
-      '', 'The 2D mask is extruded through the slab; only the depth H changes. Incompressible 3D flow: clamped MacCormack advection, explicit/Jacobi viscosity, red-black SOR projection. No vorticity confinement, no artificial forcing.',
+      '', 'The 2D mask is extruded through the slab; only the depth H changes. Incompressible 3D flow: clamped MacCormack advection, explicit/Jacobi viscosity, red-black SOR projection, one-way convective outlet against a p = 0 reference. No vorticity confinement, no artificial forcing.',
       '', 'Backends: the WebGPU solver runs the same stencils as the CPU reference with the same fixed Δt and iteration counts; its pressure solve performs exactly the tier\'s number of SOR sweeps (the CPU may exit early on residual), so scores are only comparable within one backend. Set backend = cpu to force the reference.',
+      '', 'Boundaries: the streamwise direction is an open channel (inlet + one-way outlet, on whichever faces the sign of the flow rate dictates) or a torus (compact dimension, body-force driven); the span is periodic (cylinder) or free-slip; bed and lid are no-slip or free-slip. All of these — and the depth H — are in Settings (,).',
+      '', 'Airfoil mode: every painted blob (or generated NACA section) is a rigid body pushed by the pressure integrated over its voxel faces plus the wall shear (skin friction, ν·Δu_t/h) across them. Anchors pin a body point (one = pivot, two = fixed); springs tether a body point to a world point and read the force through their extension, with hard length limits. Leaving the mode bakes the bodies back into the design; Save and Export keep the rig with the design.',
       '', 'Score components (published normalizers, not session ranges):', ...Object.entries(DEFINITIONS).map(([k, v]) => `• ${k}: ${v}`),
       `• gate: min(1, Q/${NORMALIZERS.Qmin}); runs with ‖∇·u‖ > ${NORMALIZERS.epsDiv} are struck through.`,
-      '', 'Keys: 1–6 modes · Space play/pause · . single step · [ ] depth (Shift = fine) · B/L/P brush/line/poly · Ctrl+Z / Ctrl+Shift+Z undo/redo · R reset flow · S sweep · W rewind · G overlays · ? this panel',
-      'Keyboard painting: focus the canvas, arrows move the caret (Shift ×4), Enter stamps, Backspace erases.',
-      '', 'Caveats: sweeps and evolution run the CPU reference solver at tier ' + this.evalTier + '. Scores are comparable only within the same solver version, backend and tier.',
+      '', 'Keys: 1–7 modes (6 = Orbit: the 3D voxels in a fixed 2:1:0.5 box, z stretched by 0.5/H; 7 = Airfoil) · , settings · Space play/pause · . single step · [ ] depth (Shift = fine) · B/L/P brush/line/poly · Ctrl+Z / Ctrl+Shift+Z undo/redo · R reset flow · S sweep · W rewind · G overlays · ? this panel (again or Esc to close)',
+      'Keyboard painting: focus the canvas, arrows move the caret (Shift ×4), Enter stamps, Backspace erases. Drag the gutters beside the stage to resize the side panels; double-click resets them.',
+      '', 'Caveats: sweeps run the CPU reference solver at tier ' + this.evalTier + '. Scores are comparable only within the same solver version, backend and tier.',
     ];
     this.notify.popover('About / methodology', lines.join('\n'));
   }
@@ -343,9 +373,10 @@ export class App {
     if (tag === 'BUTTON' && (e.key === ' ' || e.key === 'Enter')) return;
     if (e.ctrlKey || e.metaKey) { if (e.key.toLowerCase() === 'z') { e.preventDefault(); e.shiftKey ? this.brush.redoAction() : this.brush.undoAction(); } return; }
     const k = { '{': '[', '}': ']' }[e.key] || e.key; let handled = true;
-    if (k >= '1' && k <= '6' && k.length === 1) this.setMode(MODES[+k - 1]);
+    if (k >= '1' && k <= '7' && k.length === 1) this.setMode(MODES[+k - 1]);
     else if (k === ' ') this.action('toggle');
     else if (k === '.') this.action('step');
+    else if (k === ',') this.action('settings');
     else if (k === '[' || k === ']') { const f = e.shiftKey ? 1.02 : 1.12; this.params.set('H', +(this.params.get('H') * (k === ']' ? f : 1 / f)).toFixed(4)); }
     else switch (k.toLowerCase()) {
       case 'b': this.brush.setTool('brush'); break;
@@ -360,26 +391,4 @@ export class App {
     }
     if (handled) e.preventDefault();
   }
-}
-
-/** Mutation operator for Evolve mode: add / erase / move a small disk, respecting the ink budget and protected columns. */
-export function mutateMask(src, w, h, budget, protectedCols, rng) {
-  const m = Uint8Array.from(src); let count = 0; for (let n = 0; n < m.length; n++) count += m[n];
-  const paint = (cx, cy, r, val) => forDisk(cx, cy, r)((i, j) => {
-    if (i < protectedCols || i >= w - protectedCols || j < 0 || j >= h) return;
-    const n = i + j * w; if (m[n] === val) return; if (val && count >= budget) return; m[n] = val; count += val ? 1 : -1;
-  });
-  const ops = 1 + rng.int(3);
-  for (let o = 0; o < ops; o++) {
-    const kind = rng.int(3), r = 1 + rng.next() * 3, cx = protectedCols + 1 + rng.next() * (w - 2 * protectedCols - 2), cy = rng.next() * h;
-    if (kind === 0) paint(cx, cy, r, 1);
-    else if (kind === 1) paint(cx, cy, r, 0);
-    else {
-      let n = -1; for (let tries = 0; tries < 32 && n < 0; tries++) { const c = rng.int(m.length); if (m[c]) n = c; }
-      if (n < 0) { paint(cx, cy, r, 1); continue; }
-      const sx = (n % w) + 0.5, sy = Math.floor(n / w) + 0.5;
-      paint(sx, sy, r, 0); paint(sx + (rng.next() - 0.5) * 6, sy + (rng.next() - 0.5) * 6, r, 1);
-    }
-  }
-  return m;
 }

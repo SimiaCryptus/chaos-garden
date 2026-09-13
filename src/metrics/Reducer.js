@@ -4,7 +4,7 @@ export function bulkInvariants(solver) {
   const { u, v, w, wx, wy, wz, solid } = solver, nu = solver.nu;
   const ix = 0.5 / g.hx, iy = 0.5 / g.hy, iz = 0.5 / g.hz;
   let E = 0, Z = 0, P = 0, eps = 0, n = 0, ng = 0, divMax = 0, umax = 0, Q = 0, nq = 0;
-  const div = solver.div;
+   const div = solver.div, oc = solver.outCol ?? Nx - 2, Uref = solver.Uref ?? Math.abs(solver.U0); // outlet column follows the sign of U₀
   // |∇f|² at cell m (central differences); a plain function so the hot loop allocates nothing.
   const g3 = (f, m) => { const gx = (f[m + 1] - f[m - 1]) * ix, gy = (f[m + sy] - f[m - sy]) * iy, gz = (f[m + sz] - f[m - sz]) * iz; return gx * gx + gy * gy + gz * gz; };
   for (let k = 0; k < Nz; k++) for (let j = 0; j < Ny; j++) for (let i = 0; i < Nx; i++) {
@@ -13,7 +13,7 @@ export function bulkInvariants(solver) {
     E += uu * uu + vv * vv + ww * ww; Z += wx[m] * wx[m] + wy[m] * wy[m] + wz[m] * wz[m];
     const sp = Math.abs(uu) + Math.abs(vv) + Math.abs(ww); if (sp > umax) umax = sp;
     const ad = Math.abs(div[m]); if (ad > divMax) divMax = ad;
-    if (i === Nx - 2) { Q += uu; nq++; }
+     if (i === oc) { Q += uu; nq++; }
     if (i > 0 && i < Nx - 1 && j > 0 && j < Ny - 1 && k > 0 && k < Nz - 1) {
       ng++;
       eps += g3(u, m) + g3(v, m) + g3(w, m);
@@ -21,5 +21,6 @@ export function bulkInvariants(solver) {
     }
   }
   n = Math.max(1, n);
-  return { E: 0.5 * E / n, Z: 0.5 * Z / n, P: ng ? 0.5 * P / ng : 0, eps: ng ? nu * eps / ng : 0, divMax, divNorm: divMax * g.hx / solver.U0, umax, cfl: umax * solver.dt / g.hx, Q: nq ? Q / nq / solver.U0 : 0 };
+   // Q divides by the *signed* U₀ so a reversed current still reads +1 when it passes straight through; a still garden (U₀ = 0) has no throughput.
+   return { E: 0.5 * E / n, Z: 0.5 * Z / n, P: ng ? 0.5 * P / ng : 0, eps: ng ? nu * eps / ng : 0, divMax, divNorm: divMax * g.hx / Uref, umax, cfl: umax * solver.dt / g.hx, Q: nq && solver.U0 ? Q / nq / solver.U0 : 0 };
 }

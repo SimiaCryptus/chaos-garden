@@ -1,7 +1,7 @@
 import { log } from './Log.js';
 /**
- * Dispatches design evaluations to a pool of module workers so sweep ladders and evolve children
- * run concurrently; falls back to a cooperative main-thread pump (setTimeout slices) when workers
+  * Dispatches design evaluations to a pool of module workers so the rungs of a sweep ladder run
+  * concurrently; falls back to a cooperative main-thread pump (setTimeout slices) when workers
  * are unavailable (e.g. file://). Protocol matches workers/evolve.worker.js.
  */
 export class JobRunner {

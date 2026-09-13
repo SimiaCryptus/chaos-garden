@@ -15,3 +15,7 @@ export function lut(name) {
 }
 export function css(name, t) { const L = lut(name), i = Math.max(0, Math.min(255, Math.round(t * 255))) * 3; return `rgb(${L[i]},${L[i + 1]},${L[i + 2]})`; }
 export const COLORBLIND_SAFE = ['viridis', 'cividis', 'coolwarm'];
+/** HSL → RGB in [0,1]. */
+export function hsl(h, s, l) { const f = (n) => { const k = (n + h * 12) % 12, a = s * Math.min(l, 1 - l); return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1)); }; return [f(0), f(8), f(4)]; }
+/** One hue per inlet dye band; shared by the plan and orbit views so a band keeps its colour across modes. */
+export function bandColors(K) { const out = []; for (let c = 0; c < K; c++) out.push(hsl(c / K, 0.75, 0.55)); return out; }
