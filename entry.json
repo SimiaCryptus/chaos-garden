@@ -1,15 +1,8 @@
 {
     "id": "chaos-garden",
     "title": "Chaos Garden",
-    "description": "An in-browser, gamified fluid dynamics simulation: paint banks and obstacles into a channel, then watch the water braid, eddy and refuse to repeat itself.",
-    "tags": [
-        "fluid-dynamics",
-        "chaos",
-        "simulation",
-        "webgl",
-        "interactive"
-    ],
-    "category": "labs",
+    "pitch": "An in-browser, gamified fluid dynamics simulation",
+    "category": "lab",
     "href": "index.html",
     "readme": "README.md",
     "video": "/videos/ns_flow_demo.mp4",
