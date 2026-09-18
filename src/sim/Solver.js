@@ -13,11 +13,16 @@ export class Solver {
   static create(grid, params, opts = {}) {
     const { gpu = true, ...rest } = opts;
     if (gpu && GpuContext.current) {
-      try { return new GpuSolver(grid, params, rest); }
-      catch (err) { log.warn('GpuSolver construction failed; using the CPU solver', String(err)); }
+      try {
+        return new GpuSolver(grid, params, rest);
+      } catch (err) {
+        log.warn('GpuSolver construction failed; using the CPU solver', String(err));
+      }
     }
     return new CpuSolver(grid, params, rest);
   }
-  static get backend() { return GpuContext.current ? 'webgpu' : 'cpu'; }
+  static get backend() {
+    return GpuContext.current ? 'webgpu' : 'cpu';
+  }
   static precision = 'f32';
 }

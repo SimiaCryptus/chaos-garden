@@ -11,15 +11,28 @@ async function boot() {
   // WebGPU is auto-enabled when a device exists and the solver kernels compile. An explicit
   // `backend=webgpu` in the URL overrides the "disabled after failure" session flag.
   const wanted = decodeState(location.hash)?.params?.backend;
-  caps.webgpu = wanted === 'cpu' ? { available: false, reason: 'backend=cpu' } : await GpuContext.init({ force: wanted === 'webgpu' });
+  caps.webgpu =
+    wanted === 'cpu'
+      ? { available: false, reason: 'backend=cpu' }
+      : await GpuContext.init({ force: wanted === 'webgpu' });
   const bench = benchmark(120);
   const tierInfo = { ...selectTier(caps, bench), caps, bench };
   log.info('boot', tierInfo);
   const params = new Params(bus);
   const $ = (id) => document.getElementById(id);
   const app = new App({
-    bus, params, tierInfo,
-     dom: { app: $('app'), toolbar: $('toolbar'), tools: $('tools'), canvas: $('gl'), hud: $('hud'), side: $('side'), notify: $('notify') },
+    bus,
+    params,
+    tierInfo,
+    dom: {
+      app: $('app'),
+      toolbar: $('toolbar'),
+      tools: $('tools'),
+      canvas: $('gl'),
+      hud: $('hud'),
+      side: $('side'),
+      notify: $('notify'),
+    },
   });
   window.cg = app; // debugging handle; not used by any module
   await app.init();
@@ -27,5 +40,8 @@ async function boot() {
 
 boot().catch((err) => {
   console.error(err);
-  document.body.insertAdjacentHTML('beforeend', `<pre class="fatal">Chaos Garden failed to start:\n${err?.stack || err}</pre>`);
+  document.body.insertAdjacentHTML(
+    'beforeend',
+    `<pre class="fatal">Chaos Garden failed to start:\n${err?.stack || err}</pre>`
+  );
 });

@@ -30,37 +30,37 @@ painting can lead to very different patterns downstream.
 The screen is organized simply:
 
 - A **toolbar** at the top lets you switch between modes — painting,
-   running the simulation, stepping through time, resetting the garden —
-   and opens the settings, sharing and saving.
+  running the simulation, stepping through time, resetting the garden —
+  and opens the settings, sharing and saving.
 - A **palette of tools** on the left lets you lay down banks and place
-   obstacles. Drag the thin gutter beside it to make the column wider or
-   narrower.
+  obstacles. Drag the thin gutter beside it to make the column wider or
+  narrower.
 - The **main canvas** in the middle is your garden, viewed from above,
-   where you paint and watch the water move.
+  where you paint and watch the water move.
 - An **airfoil rig** replaces the palette in Airfoil mode: whatever you
-   have painted becomes a set of rigid bodies that the water pushes
-   around, by pressure and by skin friction. Pin a point with an anchor
-   (one anchor lets it swing, two hold it still), tether it with springs
-   to read the force off their stretch, or generate a standard NACA
-   section already rigged the way a wind-tunnel model would be. Rigs
-   are saved and exported together with the design.
+  have painted becomes a set of rigid bodies that the water pushes
+  around, by pressure and by skin friction. Pin a point with an anchor
+  (one anchor lets it swing, two hold it still), tether it with springs
+  to read the force off their stretch, or generate a standard NACA
+  section already rigged the way a wind-tunnel model would be. Rigs
+  are saved and exported together with the design.
 - An **orbit view** lifts you out of the plan: the same water drawn as
-   translucent 3D voxels in a box you can spin and zoom. The thin layer
-   is stretched to a fixed proportion so every garden fills the same
-   volume, and the internal structure — eddies stacked through the
-   depth, dye threading around obstacles — becomes visible.
+  translucent 3D voxels in a box you can spin and zoom. The thin layer
+  is stretched to a fixed proportion so every garden fills the same
+  volume, and the internal structure — eddies stacked through the
+  depth, dye threading around obstacles — becomes visible.
 - A **measurements panel** on the right reports what's happening in the
-   flow — things like speed, depth, or how "mixed up" the current has
-   become — and, in Airfoil mode, the forces on every body and the
-   reading of every spring. Its sections fold away, and it too is
-   resizable.
+  flow — things like speed, depth, or how "mixed up" the current has
+  become — and, in Airfoil mode, the forces on every body and the
+  reading of every spring. Its sections fold away, and it too is
+  resizable.
 - A **settings dialog** (⚙ on the toolbar, or the `,` key) holds every
-   parameter with a plain-language description: the depth of the water
-   on a slider marked with the sizes of what you've painted, the flow
-   rate (which may be negative, sending the water right to left), the
-   viscosity, and the shape of the world itself — an open channel or a
-   torus where the water circulates forever, side walls that are
-   periodic or ideally slippery, a bed and lid that grip or don't.
+  parameter with a plain-language description: the depth of the water
+  on a slider marked with the sizes of what you've painted, the flow
+  rate (which may be negative, sending the water right to left), the
+  viscosity, and the shape of the world itself — an open channel or a
+  torus where the water circulates forever, side walls that are
+  periodic or ideally slippery, a bed and lid that grip or don't.
 
 There is no fixed goal or score. You paint, you run the water, you
 watch, and you adjust — much like tending an actual garden bed to see
